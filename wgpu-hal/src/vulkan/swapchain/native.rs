@@ -433,7 +433,7 @@ impl Swapchain for NativeSwapchain {
                 self.raw,
                 timeout_ns,
                 acquire_semaphore_guard.acquire,
-                self.fence,
+                vk::Fence::null(), // gaym: revert PR #8420 fence wait — kills AMD Immediate perf
             )
         } {
             // We treat `VK_SUBOPTIMAL_KHR` as `VK_SUCCESS` on Android.
@@ -456,28 +456,12 @@ impl Swapchain for NativeSwapchain {
             }
         };
 
-        // Wait for the image was acquired to be fully ready to be rendered too.
-        //
-        // This wait is very important on Windows to avoid bad frame pacing on
-        // Windows where the Vulkan driver is using a DXGI swapchain. See
-        // https://github.com/gfx-rs/wgpu/issues/8310 and
-        // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        //
-        // On other platforms, this wait may serve to slightly decrease frame
-        // latency, depending on how the platform implements waiting within
-        // acquire.
-        unsafe {
-            // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
-            self.device
-                .raw
-                .wait_for_fences(&[self.fence], true, timeout_ns)
-                .map_err(map_host_device_oom_and_lost_err)?;
-
-            self.device
-                .raw
-                .reset_fences(&[self.fence])
-                .map_err(map_host_device_oom_and_lost_err)?;
-        }
+        // gaym: PR #8420 added a wait_for_fences here that helped NVIDIA
+        // Fifo frame pacing but stalls AMD Immediate by ~4.6 ms per frame
+        // (10x worse mean fps on RX 6800 XT + Vulkan + Win 11).
+        // Bisect: wgpu-hal v26.0.5 GOOD (82 µs r_acquire), v26.0.6 BAD
+        // (4833 µs). Reverting just this block restores baseline. See
+        // gaym memory project_wgpu_26_regression_blocks_bump_2026_05_17.md.
 
         drop(acquire_semaphore_guard);
         // We only advance the surface semaphores if we successfully acquired an image, otherwise
