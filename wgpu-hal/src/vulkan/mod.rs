@@ -673,6 +673,14 @@ pub struct Buffer {
     allocation: Option<Mutex<BufferMemoryBacking>>,
 }
 impl Buffer {
+    /// The raw `VkBuffer` handle backing this hal buffer. Needed by the engine
+    /// to bind a wgpu-allocated buffer into a raw-Vulkan command stream on the
+    /// 2nd async-compute queue, and (Phase 4) to emit cross-queue ownership /
+    /// memory barriers for buffers the mesher writes and render reads.
+    pub fn raw_buffer(&self) -> vk::Buffer {
+        self.raw
+    }
+
     /// # Safety
     ///
     /// - `vk_buffer`'s memory must be managed by the caller
