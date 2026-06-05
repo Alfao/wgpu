@@ -497,6 +497,13 @@ struct DeviceShared {
 
     empty_descriptor_set_layout: vk::DescriptorSetLayout,
 
+    /// A 2nd VkQueue from a dedicated async-compute family (COMPUTE without
+    /// GRAPHICS), created alongside the main queue so the engine can run the
+    /// GPU mesher concurrently with render (async-compute mesher-render arc).
+    /// `None` when no dedicated async-compute family is present.
+    compute_family_index: Option<u32>,
+    compute_raw_queue: Option<vk::Queue>,
+
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
     drop_guard: Option<crate::DropGuard>,
@@ -1368,6 +1375,19 @@ impl crate::Queue for Queue {
 impl Queue {
     pub fn raw_device(&self) -> &ash::Device {
         &self.device.raw
+    }
+
+    /// The 2nd `VkQueue` from a dedicated async-compute family, if one exists,
+    /// for running the GPU mesher concurrently with render (mesher-render arc).
+    /// `None` when the device has no dedicated async-compute family.
+    pub fn compute_queue(&self) -> Option<vk::Queue> {
+        self.device.compute_raw_queue
+    }
+
+    /// Queue-family index backing [`Self::compute_queue`] (for the engine to
+    /// create command pools on the compute family). `None` if absent.
+    pub fn compute_family_index(&self) -> Option<u32> {
+        self.device.compute_family_index
     }
 
     pub fn add_signal_semaphore(&self, semaphore: vk::Semaphore, semaphore_value: Option<u64>) {

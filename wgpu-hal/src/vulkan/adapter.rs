@@ -2424,6 +2424,7 @@ impl super::Adapter {
         memory_hints: &wgt::MemoryHints,
         family_index: u32,
         queue_index: u32,
+        compute_family_index: Option<u32>,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
@@ -2700,6 +2701,10 @@ impl super::Adapter {
             profiling::scope!("vkGetDeviceQueue");
             unsafe { raw_device.get_device_queue(family_index, queue_index) }
         };
+        // 2nd queue from a dedicated async-compute family (mesher-render arc).
+        // The device was created with this family's queue in `open_with_callback`.
+        let compute_raw_queue =
+            compute_family_index.map(|cf| unsafe { raw_device.get_device_queue(cf, 0) });
 
         let driver_version = self
             .phd_capabilities
@@ -2727,6 +2732,8 @@ impl super::Adapter {
             family_index,
             queue_index,
             raw_queue,
+            compute_family_index,
+            compute_raw_queue,
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
@@ -2825,6 +2832,33 @@ impl super::Adapter {
             .queue_priorities(&[1.0]);
         let mut family_infos = Vec::from([family_info]);
 
+        // mesher-render async-compute arc: also request a queue from a dedicated
+        // async-compute family (COMPUTE without GRAPHICS) when one exists, so the
+        // engine can run the GPU mesher concurrently with render. `&[1.0]` is
+        // const-promoted to 'static (same as `family_info` above), so the
+        // pushed create-info's priority pointer stays valid.
+        let compute_family_index = {
+            let qfps = unsafe {
+                self.instance
+                    .raw
+                    .get_physical_device_queue_family_properties(self.raw)
+            };
+            qfps.iter().enumerate().find_map(|(i, qf)| {
+                let i = i as u32;
+                (i != family_index
+                    && qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                    && !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+                .then_some(i)
+            })
+        };
+        if let Some(cf) = compute_family_index {
+            family_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(cf)
+                    .queue_priorities(&[1.0]),
+            );
+        }
+
         let mut pre_info = vk::DeviceCreateInfo::default();
 
         if let Some(callback) = callback {
@@ -2879,6 +2913,7 @@ impl super::Adapter {
                 memory_hints,
                 family_info.queue_family_index,
                 0,
+                compute_family_index,
             )
         }
     }
