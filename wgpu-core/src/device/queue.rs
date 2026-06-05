@@ -50,6 +50,14 @@ pub struct Queue {
     raw: Box<dyn hal::DynQueue>,
     pub(crate) pending_writes: Mutex<PendingWrites>,
     life_tracker: Mutex<LifetimeTracker>,
+    /// Separate submission-index counter + lifetime tracker for the async-compute
+    /// (mesher) queue (mesher∥render arc). The compute submit signals its own
+    /// `mesher_timeline` (NOT the device fence — two concurrent queues sharing one
+    /// monotonic timeline would be illegal), so its completions are tracked
+    /// independently here and triaged in [`Queue::maintain`] by polling the
+    /// timeline via `get_compute_completed_value`.
+    compute_command_index: core::sync::atomic::AtomicU64,
+    compute_life_tracker: Mutex<LifetimeTracker>,
     // The device needs to be dropped last (`Device.zero_buffer` might be referenced by the encoder in pending writes).
     pub(crate) device: Arc<Device>,
 }
@@ -105,6 +113,8 @@ impl Queue {
             device,
             pending_writes: Mutex::new(rank::QUEUE_PENDING_WRITES, pending_writes),
             life_tracker: Mutex::new(rank::QUEUE_LIFE_TRACKER, LifetimeTracker::new()),
+            compute_command_index: core::sync::atomic::AtomicU64::new(0),
+            compute_life_tracker: Mutex::new(rank::QUEUE_LIFE_TRACKER, LifetimeTracker::new()),
         })
     }
 
@@ -128,12 +138,24 @@ impl Queue {
         bool,
     ) {
         let mut life_tracker = self.lock_life();
-        let submission_closures = life_tracker.triage_submissions(submission_index);
+        let mut submission_closures = life_tracker.triage_submissions(submission_index);
 
-        let mapping_closures = life_tracker.handle_mapping(snatch_guard);
-        let blas_closures = life_tracker.handle_compact_read_back();
+        let mut mapping_closures = life_tracker.handle_mapping(snatch_guard);
+        let mut blas_closures = life_tracker.handle_compact_read_back();
 
-        let queue_empty = life_tracker.queue_empty();
+        let mut queue_empty = life_tracker.queue_empty();
+        drop(life_tracker);
+
+        // Async-compute (mesher) side (mesher∥render arc): poll the mesher
+        // timeline and triage the separate compute lifetime tracker — recycle
+        // compute-family encoders to the compute free-list, fire any readback
+        // maps. Locked AFTER the render tracker is dropped, never nested.
+        let compute_done = unsafe { self.raw().get_compute_completed_value() };
+        let mut compute_life = self.compute_life_tracker.lock();
+        submission_closures.extend(compute_life.triage_submissions(compute_done));
+        mapping_closures.extend(compute_life.handle_mapping(snatch_guard));
+        blas_closures.extend(compute_life.handle_compact_read_back());
+        queue_empty &= compute_life.queue_empty();
 
         (
             submission_closures,
@@ -408,6 +430,7 @@ impl PendingWrites {
                     is_open: false,
                     api: crate::command::EncodingApi::InternalUse,
                     label: "(wgpu internal) PendingWrites command encoder".into(),
+                    compute: false,
                 },
                 trackers: Tracker::new(device.ordered_buffer_usages, device.ordered_texture_usages),
                 temp_resources: mem::take(&mut self.temp_resources),
@@ -1507,6 +1530,160 @@ impl Queue {
         Ok(submit_index)
     }
 
+    /// Submit `command_buffers` (recorded via
+    /// [`Device::create_command_encoder_compute`] on the async-compute family)
+    /// to the dedicated 2nd queue, to overlap render (mesher∥render arc).
+    ///
+    /// A slimmed [`Self::submit`]: it runs the same bake + device-tracker barrier
+    /// prep, but (a) does NOT touch the device fence / `active_submission_index`
+    /// — the compute queue signals its own monotonic `mesher_timeline`, tracked
+    /// in `compute_life_tracker`; (b) has no surface textures; (c) does NOT flush
+    /// queue-0 pending writes. Completion (encoder recycle + readback maps) is
+    /// triaged by the next render submit's `maintain`, which polls the timeline.
+    /// The render submit waits on the consumed value via [`Self::add_compute_wait`].
+    pub fn submit_compute(
+        &self,
+        command_buffers: &[Arc<CommandBuffer>],
+    ) -> Result<SubmissionIndex, (SubmissionIndex, QueueSubmitError)> {
+        profiling::scope!("Queue::submit_compute");
+        api_log!("Queue::submit_compute");
+
+        let submit_index = self.compute_command_index.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let res = 'error: {
+            let snatch_guard = self.device.snatchable_lock.read();
+            // Only needed by `validate_command_buffer` (acceleration-structure
+            // build indices); the mesher uses none. Never acquires the device
+            // fence, so it can't form an AB-BA with `submit`.
+            let mut command_index_guard = self.device.command_indices.write();
+
+            if let Err(e) = self.device.check_is_valid() {
+                break 'error Err(e.into());
+            }
+
+            let mut active_executions = Vec::new();
+            let mut used_surface_textures = track::TextureUsageScope::default();
+            let mut submit_surface_textures_owned = FastHashMap::default();
+
+            if !command_buffers.is_empty() {
+                let mut first_error = None;
+                for command_buffer in command_buffers {
+                    used_surface_textures.set_size(self.device.tracker_indices.textures.size());
+                    let cmd_buf_data = command_buffer.take_finished();
+                    if first_error.is_some() {
+                        continue;
+                    }
+                    let mut baked = match cmd_buf_data {
+                        Ok(cmd_buf_data) => {
+                            let res = validate_command_buffer(
+                                command_buffer,
+                                self,
+                                &cmd_buf_data,
+                                &snatch_guard,
+                                &mut submit_surface_textures_owned,
+                                &mut used_surface_textures,
+                                &mut command_index_guard,
+                            );
+                            if let Err(err) = res {
+                                first_error.get_or_insert(err);
+                                continue;
+                            }
+                            cmd_buf_data.set_acceleration_structure_dependencies(&snatch_guard);
+                            cmd_buf_data.into_baked_commands()
+                        }
+                        Err(err) => {
+                            first_error.get_or_insert(err.into());
+                            continue;
+                        }
+                    };
+
+                    // Resource-state transitions from the shared device tracker
+                    // (recorded into the compute-family encoder). Cross-queue
+                    // queue-family-ownership barriers are Phase 4.
+                    if let Err(e) = baked.encoder.open_pass(hal_label(
+                        Some("(wgpu internal) Transit (compute)"),
+                        self.device.instance_flags,
+                    )) {
+                        break 'error Err(e.into());
+                    }
+                    let mut trackers = self.device.trackers.lock();
+                    if let Err(e) = baked.initialize_buffer_memory(&mut trackers, &snatch_guard) {
+                        break 'error Err(e.into());
+                    }
+                    if let Err(e) =
+                        baked.initialize_texture_memory(&mut trackers, &self.device, &snatch_guard)
+                    {
+                        break 'error Err(e.into());
+                    }
+                    CommandEncoder::insert_barriers_from_device_tracker(
+                        baked.encoder.raw.as_mut(),
+                        &mut trackers,
+                        &baked.trackers,
+                        &snatch_guard,
+                    );
+                    drop(trackers);
+                    if let Err(e) = baked.encoder.close_and_push_front() {
+                        break 'error Err(e.into());
+                    }
+
+                    // The mesher records no surface textures.
+                    debug_assert!(used_surface_textures.is_empty());
+
+                    active_executions.push(EncoderInFlight {
+                        inner: baked.encoder,
+                        trackers: baked.trackers,
+                        temp_resources: baked.temp_resources,
+                        _indirect_draw_validation_resources: baked
+                            .indirect_draw_validation_resources,
+                        pending_buffers: FastHashMap::default(),
+                        pending_textures: FastHashMap::default(),
+                        pending_blas_s: FastHashMap::default(),
+                    });
+                }
+                if let Some(first_error) = first_error {
+                    break 'error Err(first_error);
+                }
+            }
+
+            let hal_command_buffers = active_executions
+                .iter()
+                .flat_map(|e| e.inner.list.iter().map(|b| b.as_ref()))
+                .collect::<Vec<_>>();
+
+            if let Err(e) = unsafe {
+                self.raw()
+                    .submit_compute(&hal_command_buffers, submit_index)
+            }
+            .map_err(|e| self.device.handle_hal_error(e))
+            {
+                break 'error Err(e.into());
+            }
+
+            drop(command_index_guard);
+            drop(snatch_guard);
+
+            // Track for completion (encoder recycle + readback maps); triaged by
+            // the next render submit's `maintain` once the timeline reaches it.
+            self.compute_life_tracker
+                .lock()
+                .track_submission(submit_index, active_executions);
+
+            Ok(())
+        };
+
+        if let Err(e) = res {
+            return Err((submit_index, e));
+        }
+        api_log!("Queue::submit_compute returned submit index {submit_index}");
+        Ok(submit_index)
+    }
+
+    /// Make the NEXT render [`Self::submit`] wait on the mesher timeline reaching
+    /// `value` (i.e. this frame's mesher output is ready before render reads it).
+    pub fn add_compute_wait(&self, value: SubmissionIndex) {
+        unsafe { self.raw().add_compute_wait(value) }
+    }
+
     pub fn get_timestamp_period(&self) -> f32 {
         unsafe { self.raw().get_timestamp_period() }
     }
@@ -1736,6 +1913,30 @@ impl Global {
             .collect::<Vec<_>>();
         drop(command_buffer_guard);
         queue.submit(&command_buffers)
+    }
+
+    /// Submit command buffers (recorded via `device_create_command_encoder_compute`)
+    /// to the dedicated async-compute queue, to overlap render (mesher∥render arc).
+    pub fn queue_submit_compute(
+        &self,
+        queue_id: QueueId,
+        command_buffer_ids: &[id::CommandBufferId],
+    ) -> Result<SubmissionIndex, (SubmissionIndex, QueueSubmitError)> {
+        let queue = self.hub.queues.get(queue_id);
+        let command_buffer_guard = self.hub.command_buffers.read();
+        let command_buffers = command_buffer_ids
+            .iter()
+            .map(|id| command_buffer_guard.get(*id))
+            .collect::<Vec<_>>();
+        drop(command_buffer_guard);
+        queue.submit_compute(&command_buffers)
+    }
+
+    /// Make the next render submit on `queue_id` wait on the mesher timeline
+    /// reaching `value` (mesher∥render arc).
+    pub fn queue_add_compute_wait(&self, queue_id: QueueId, value: SubmissionIndex) {
+        let queue = self.hub.queues.get(queue_id);
+        queue.add_compute_wait(value);
     }
 
     pub fn queue_get_timestamp_period(&self, queue_id: QueueId) -> f32 {

@@ -214,6 +214,22 @@ impl Device {
         }
     }
 
+    /// Like [`Self::create_command_encoder`], but the encoder records on the
+    /// dedicated async-compute queue family; the `CommandBuffer` it produces
+    /// MUST be submitted via [`Queue::submit_compute`] (not [`Queue::submit`]),
+    /// so it overlaps render (mesher∥render arc). Falls back to a normal encoder
+    /// on adapters without a 2nd queue.
+    pub fn create_command_encoder_compute(
+        &self,
+        desc: &CommandEncoderDescriptor<'_>,
+    ) -> CommandEncoder {
+        let encoder = self.inner.create_command_encoder_compute(desc);
+        CommandEncoder {
+            inner: encoder,
+            actions: Default::default(),
+        }
+    }
+
     /// Creates an empty [`RenderBundleEncoder`].
     #[must_use]
     pub fn create_render_bundle_encoder<'a>(

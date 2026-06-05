@@ -1768,6 +1768,32 @@ impl dispatch::DeviceInterface for CoreDevice {
         .into()
     }
 
+    fn create_command_encoder_compute(
+        &self,
+        desc: &crate::CommandEncoderDescriptor<'_>,
+    ) -> dispatch::DispatchCommandEncoder {
+        let (id, error) = self.context.0.device_create_command_encoder_compute(
+            self.id,
+            &desc.map_label(|l| l.map(Borrowed)),
+            None,
+        );
+        if let Some(cause) = error {
+            self.context.handle_error(
+                &self.error_sink,
+                cause,
+                desc.label,
+                "Device::create_command_encoder_compute",
+            );
+        }
+
+        CoreCommandEncoder {
+            context: self.context.clone(),
+            id,
+            error_sink: Arc::clone(&self.error_sink),
+        }
+        .into()
+    }
+
     fn create_command_encoder(
         &self,
         desc: &crate::CommandEncoderDescriptor<'_>,
@@ -2105,6 +2131,38 @@ impl dispatch::QueueInterface for CoreQueue {
         drop(temp_command_buffers);
 
         index
+    }
+
+    fn submit_compute(
+        &self,
+        command_buffers: &mut dyn Iterator<Item = dispatch::DispatchCommandBuffer>,
+    ) -> u64 {
+        let temp_command_buffers = command_buffers.collect::<SmallVec<[_; 4]>>();
+        let command_buffer_ids = temp_command_buffers
+            .iter()
+            .map(|cmdbuf| cmdbuf.as_core().id)
+            .collect::<SmallVec<[_; 4]>>();
+
+        let index = match self
+            .context
+            .0
+            .queue_submit_compute(self.id, &command_buffer_ids)
+        {
+            Ok(index) => index,
+            Err((index, err)) => {
+                self.context
+                    .handle_error_nolabel(&self.error_sink, err, "Queue::submit_compute");
+                index
+            }
+        };
+
+        drop(temp_command_buffers);
+
+        index
+    }
+
+    fn add_compute_wait(&self, value: u64) {
+        self.context.0.queue_add_compute_wait(self.id, value);
     }
 
     fn get_timestamp_period(&self) -> f32 {

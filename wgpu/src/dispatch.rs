@@ -199,6 +199,14 @@ pub trait DeviceInterface: CommonTraits {
         &self,
         desc: &crate::CommandEncoderDescriptor<'_>,
     ) -> DispatchCommandEncoder;
+    /// Encoder on the dedicated async-compute queue family (mesher∥render arc).
+    /// Default: the normal encoder (backends without a 2nd queue).
+    fn create_command_encoder_compute(
+        &self,
+        desc: &crate::CommandEncoderDescriptor<'_>,
+    ) -> DispatchCommandEncoder {
+        self.create_command_encoder(desc)
+    }
     fn create_render_bundle_encoder(
         &self,
         desc: &crate::RenderBundleEncoderDescriptor<'_>,
@@ -256,6 +264,21 @@ pub trait QueueInterface: CommonTraits {
 
     /// Submit must always drain the iterator, even in the case of error.
     fn submit(&self, command_buffers: &mut dyn Iterator<Item = DispatchCommandBuffer>) -> u64;
+
+    /// Submit command buffers to the dedicated async-compute queue (mesher∥render
+    /// arc). Default: unsupported (only the wgpu-core backend implements it).
+    fn submit_compute(
+        &self,
+        command_buffers: &mut dyn Iterator<Item = DispatchCommandBuffer>,
+    ) -> u64 {
+        let _ = command_buffers;
+        unreachable!("submit_compute is only supported on the wgpu-core backend")
+    }
+    /// Make the next render submit wait on the mesher timeline reaching `value`.
+    /// Default: no-op.
+    fn add_compute_wait(&self, value: u64) {
+        let _ = value;
+    }
 
     fn get_timestamp_period(&self) -> f32;
     fn on_submitted_work_done(&self, callback: BoxSubmittedWorkDoneCallback);

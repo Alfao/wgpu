@@ -14,12 +14,21 @@ use crate::lock::{rank, Mutex};
 /// [cb]: hal::Api::CommandBuffer
 pub(crate) struct CommandAllocator {
     free_encoders: Mutex<Vec<Box<dyn hal::DynCommandEncoder>>>,
+    /// Separate free-list for encoders created on the async-compute queue
+    /// family (mesher∥render arc). A command buffer is bound to its pool's queue
+    /// family, so a compute-family encoder must NEVER be recycled into the
+    /// graphics `free_encoders` (it would be handed to a graphics submit).
+    free_compute_encoders: Mutex<Vec<Box<dyn hal::DynCommandEncoder>>>,
 }
 
 impl CommandAllocator {
     pub(crate) fn new() -> Self {
         Self {
             free_encoders: Mutex::new(rank::COMMAND_ALLOCATOR_FREE_ENCODERS, Vec::new()),
+            free_compute_encoders: Mutex::new(
+                rank::COMMAND_ALLOCATOR_FREE_ENCODERS,
+                Vec::new(),
+            ),
         }
     }
 
@@ -48,5 +57,29 @@ impl CommandAllocator {
     pub(crate) fn release_encoder(&self, encoder: Box<dyn hal::DynCommandEncoder>) {
         let mut free_encoders = self.free_encoders.lock();
         free_encoders.push(encoder);
+    }
+
+    /// Like [`Self::acquire_encoder`], but the encoder is created on the
+    /// async-compute queue family (mesher∥render arc) so its command buffers can
+    /// be submitted via `Queue::submit_compute`.
+    pub(crate) fn acquire_encoder_compute(
+        &self,
+        device: &dyn hal::DynDevice,
+        queue: &dyn hal::DynQueue,
+    ) -> Result<Box<dyn hal::DynCommandEncoder>, hal::DeviceError> {
+        let mut free = self.free_compute_encoders.lock();
+        match free.pop() {
+            Some(encoder) => Ok(encoder),
+            None => unsafe {
+                let hal_desc = hal::CommandEncoderDescriptor { label: None, queue };
+                device.create_command_encoder_compute(&hal_desc)
+            },
+        }
+    }
+
+    /// Add a compute-family `encoder` back to the compute free pool.
+    pub(crate) fn release_compute_encoder(&self, encoder: Box<dyn hal::DynCommandEncoder>) {
+        let mut free = self.free_compute_encoders.lock();
+        free.push(encoder);
     }
 }

@@ -628,6 +628,12 @@ pub(crate) struct InnerCommandEncoder {
     pub(crate) api: EncodingApi,
 
     pub(crate) label: String,
+
+    /// True if `raw` was created on the async-compute queue family
+    /// (`create_command_encoder_compute`, mesher∥render arc). Routes recycling
+    /// to the compute free-list — a compute-family encoder must not be recycled
+    /// into the graphics pool.
+    pub(crate) compute: bool,
 }
 
 impl InnerCommandEncoder {
@@ -793,7 +799,15 @@ impl Drop for InnerCommandEncoder {
         }
         // SAFETY: We are in the Drop impl and we don't use self.raw anymore after this point.
         let raw = unsafe { ManuallyDrop::take(&mut self.raw) };
-        self.device.command_allocator.release_encoder(raw);
+        // Recycle to the matching free-list: a compute-family encoder must never
+        // be handed to a graphics submit (its pool is bound to family 1).
+        if self.compute {
+            self.device
+                .command_allocator
+                .release_compute_encoder(raw);
+        } else {
+            self.device.command_allocator.release_encoder(raw);
+        }
     }
 }
 
@@ -879,6 +893,7 @@ impl CommandEncoder {
         encoder: Box<dyn hal::DynCommandEncoder>,
         device: &Arc<Device>,
         label: &Label,
+        compute: bool,
     ) -> Self {
         CommandEncoder {
             device: device.clone(),
@@ -893,6 +908,7 @@ impl CommandEncoder {
                         is_open: false,
                         api: EncodingApi::Undecided,
                         label: label.to_string(),
+                        compute,
                     },
                     trackers: Tracker::new(
                         device.ordered_buffer_usages,

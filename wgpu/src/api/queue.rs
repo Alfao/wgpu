@@ -274,6 +274,35 @@ impl Queue {
         SubmissionIndex { index }
     }
 
+    /// Submit `command_buffers` (recorded via
+    /// [`Device::create_command_encoder_compute`]) to the dedicated async-compute
+    /// queue, so the GPU mesher can run concurrently with render (mesher∥render
+    /// arc). Returns the compute submission index; pass it to
+    /// [`Self::add_compute_wait`] on the render submit that consumes its output.
+    pub fn submit_compute<I: IntoIterator<Item = CommandBuffer>>(
+        &self,
+        command_buffers: I,
+    ) -> SubmissionIndex {
+        let mut actions = DeferredCommandBufferActions::default();
+
+        let mut command_buffers = command_buffers.into_iter().map(|comb| {
+            actions.append(&mut comb.actions.lock());
+            comb.buffer
+        });
+        let index = self.inner.submit_compute(&mut command_buffers);
+
+        actions.execute(&self.inner);
+
+        SubmissionIndex { index }
+    }
+
+    /// Make the next render [`Self::submit`] wait until the async-compute
+    /// submission identified by `value` has completed on the GPU (mesher∥render
+    /// arc). Near-zero in steady state when render consumes prior-frame output.
+    pub fn add_compute_wait(&self, value: SubmissionIndex) {
+        self.inner.add_compute_wait(value.index);
+    }
+
     /// Gets the amount of nanoseconds each tick of a timestamp query represents.
     ///
     /// Returns zero if timestamp queries are unsupported.

@@ -1179,6 +1179,41 @@ impl Global {
         (id, Some(error))
     }
 
+    /// Like [`Self::device_create_command_encoder`], but the encoder records on
+    /// the dedicated async-compute queue family, so its command buffers can be
+    /// submitted via [`Self::queue_submit_compute`] (mesher∥render arc).
+    pub fn device_create_command_encoder_compute(
+        &self,
+        device_id: DeviceId,
+        desc: &wgt::CommandEncoderDescriptor<Label>,
+        id_in: Option<id::CommandEncoderId>,
+    ) -> (id::CommandEncoderId, Option<DeviceError>) {
+        profiling::scope!("Device::create_command_encoder_compute");
+
+        let hub = &self.hub;
+        let fid = hub.command_encoders.prepare(id_in);
+
+        let device = self.hub.devices.get(device_id);
+
+        let error = 'error: {
+            let cmd_enc = match device.create_command_encoder_compute(&desc.label) {
+                Ok(cmd_enc) => cmd_enc,
+                Err(e) => break 'error e,
+            };
+
+            let id = fid.assign(cmd_enc);
+            api_log!("Device::create_command_encoder_compute -> {id:?}");
+            return (id, None);
+        };
+
+        let id = fid.assign(Arc::new(CommandEncoder::new_invalid(
+            &device,
+            &desc.label,
+            error.clone().into(),
+        )));
+        (id, Some(error))
+    }
+
     pub fn command_encoder_drop(&self, command_encoder_id: id::CommandEncoderId) {
         profiling::scope!("CommandEncoder::drop");
         api_log!("CommandEncoder::drop {command_encoder_id:?}");

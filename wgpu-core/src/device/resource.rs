@@ -2495,11 +2495,34 @@ impl Device {
             .acquire_encoder(self.raw(), queue.raw())
             .map_err(|e| self.handle_hal_error(e))?;
 
-        let cmd_enc = command::CommandEncoder::new(encoder, self, label);
+        let cmd_enc = command::CommandEncoder::new(encoder, self, label, false);
 
         let cmd_enc = Arc::new(cmd_enc);
 
         Ok(cmd_enc)
+    }
+
+    /// Like [`Self::create_command_encoder`], but the encoder records on the
+    /// dedicated async-compute queue family, so its command buffers can be
+    /// submitted via [`Queue::submit_compute`] to overlap render (mesher∥render
+    /// arc). The resulting [`CommandEncoder`] is flagged `compute` so it recycles
+    /// to the compute free-list.
+    pub(crate) fn create_command_encoder_compute(
+        self: &Arc<Self>,
+        label: &crate::Label,
+    ) -> Result<Arc<command::CommandEncoder>, DeviceError> {
+        self.check_is_valid()?;
+
+        let queue = self.get_queue().unwrap();
+
+        let encoder = self
+            .command_allocator
+            .acquire_encoder_compute(self.raw(), queue.raw())
+            .map_err(|e| self.handle_hal_error(e))?;
+
+        let cmd_enc = command::CommandEncoder::new(encoder, self, label, true);
+
+        Ok(Arc::new(cmd_enc))
     }
 
     /// Generate information about late-validated buffer bindings for pipelines.
