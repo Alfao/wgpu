@@ -61,6 +61,12 @@ pub trait DynDevice: DynResource {
         desc: &CommandEncoderDescriptor<dyn DynQueue>,
     ) -> Result<Box<dyn DynCommandEncoder>, DeviceError>;
 
+    // Async-compute mesher∥render arc: encoder on the 2nd-queue family.
+    unsafe fn create_command_encoder_compute(
+        &self,
+        desc: &CommandEncoderDescriptor<dyn DynQueue>,
+    ) -> Result<Box<dyn DynCommandEncoder>, DeviceError>;
+
     unsafe fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDescriptor,
@@ -268,6 +274,18 @@ impl<D: Device + DynResource> DynDevice for D {
             queue: desc.queue.expect_downcast_ref(),
         };
         unsafe { D::create_command_encoder(self, &desc) }
+            .map(|b| -> Box<dyn DynCommandEncoder> { Box::new(b) })
+    }
+
+    unsafe fn create_command_encoder_compute(
+        &self,
+        desc: &CommandEncoderDescriptor<'_, dyn DynQueue>,
+    ) -> Result<Box<dyn DynCommandEncoder>, DeviceError> {
+        let desc = CommandEncoderDescriptor {
+            label: desc.label,
+            queue: desc.queue.expect_downcast_ref(),
+        };
+        unsafe { D::create_command_encoder_compute(self, &desc) }
             .map(|b| -> Box<dyn DynCommandEncoder> { Box::new(b) })
     }
 

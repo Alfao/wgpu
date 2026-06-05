@@ -1277,6 +1277,47 @@ impl crate::Device for super::Device {
         })
     }
 
+    unsafe fn create_command_encoder_compute(
+        &self,
+        _desc: &crate::CommandEncoderDescriptor<super::Queue>,
+    ) -> Result<super::CommandEncoder, crate::DeviceError> {
+        // Pool on the dedicated async-compute family so these command buffers
+        // can be submitted via `Queue::submit_compute` (mesher∥render arc). The
+        // `desc.queue.family_index` is the GRAPHICS family, so we ignore it.
+        let family = self
+            .shared
+            .compute_family_index
+            .expect("create_command_encoder_compute: no async-compute queue family");
+        let vk_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(family)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+
+        let raw = unsafe {
+            self.shared
+                .raw
+                .create_command_pool(&vk_info, None)
+                .map_err(super::map_host_device_oom_err)?
+        };
+
+        self.counters.command_encoders.add(1);
+
+        Ok(super::CommandEncoder {
+            raw,
+            device: Arc::clone(&self.shared),
+            active: vk::CommandBuffer::null(),
+            bind_point: vk::PipelineBindPoint::default(),
+            temp: super::Temp::default(),
+            free: Vec::new(),
+            discarded: Vec::new(),
+            rpass_debug_marker_active: false,
+            end_of_pass_timer_query: None,
+            framebuffers: Default::default(),
+            temp_texture_views: Default::default(),
+            counters: Arc::clone(&self.counters),
+            current_pipeline_is_multiview: false,
+        })
+    }
+
     unsafe fn create_bind_group_layout(
         &self,
         desc: &crate::BindGroupLayoutDescriptor,

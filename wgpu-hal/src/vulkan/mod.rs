@@ -504,6 +504,15 @@ struct DeviceShared {
     compute_family_index: Option<u32>,
     compute_raw_queue: Option<vk::Queue>,
 
+    /// Cross-queue producer→consumer timeline semaphore for the async-compute
+    /// mesher∥render arc: the GPU-mesher submit (on `compute_raw_queue` via
+    /// [`Queue::submit_compute`]) signals it; the render submit waits on the
+    /// value it consumes (via [`Queue::add_compute_wait`]). Signalled ONLY by
+    /// the compute queue, so its value stays monotonic (a single shared device
+    /// timeline signalled by two concurrent queues would be illegal). `None`
+    /// when there is no 2nd queue or no timeline-semaphore support.
+    mesher_timeline: Option<vk::Semaphore>,
+
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
     drop_guard: Option<crate::DropGuard>,
@@ -518,6 +527,9 @@ impl Drop for DeviceShared {
             self.raw
                 .destroy_descriptor_set_layout(self.empty_descriptor_set_layout, None)
         };
+        if let Some(sem) = self.mesher_timeline {
+            unsafe { self.raw.destroy_semaphore(sem, None) };
+        }
         if self.drop_guard.is_none() {
             unsafe { self.raw.destroy_device(None) };
         }
@@ -625,6 +637,10 @@ pub struct Queue {
     family_index: u32,
     relay_semaphores: Mutex<RelaySemaphores>,
     signal_semaphores: Mutex<SemaphoreList>,
+    /// Cross-queue waits to inject into the NEXT render [`submit`](Queue::submit):
+    /// the render queue waits on the mesher-timeline value(s) it consumes,
+    /// registered via [`Queue::add_compute_wait`] (async-compute mesher∥render arc).
+    compute_wait_semaphores: Mutex<SemaphoreList>,
 }
 
 impl Queue {
@@ -1304,6 +1320,16 @@ impl crate::Queue for Queue {
             signal_semaphores.append(&mut guard);
         }
 
+        // Cross-queue: wait on any mesher-timeline values the engine registered
+        // via `add_compute_wait` — this render submit consumes that frame's GPU
+        // mesher output (async-compute mesher∥render arc).
+        {
+            let mut compute_wait = self.compute_wait_semaphores.lock();
+            if !compute_wait.is_empty() {
+                wait_semaphores.append(&mut compute_wait);
+            }
+        }
+
         // In order for submissions to be strictly ordered, we encode a dependency between each submission
         // using a pair of semaphores. This adds a wait if it is needed, and signals the next semaphore.
         let semaphore_state = self.relay_semaphores.lock().advance(&self.device)?;
@@ -1377,6 +1403,77 @@ impl crate::Queue for Queue {
 
     unsafe fn get_timestamp_period(&self) -> f32 {
         self.device.timestamp_period
+    }
+
+    unsafe fn submit_compute(
+        &self,
+        command_buffers: &[&CommandBuffer],
+        signal_value: crate::FenceValue,
+    ) -> Result<(), crate::DeviceError> {
+        let compute_queue = self
+            .device
+            .compute_raw_queue
+            .expect("submit_compute: no async-compute queue");
+        let timeline = self
+            .device
+            .mesher_timeline
+            .expect("submit_compute: no mesher timeline");
+
+        let vk_cmd_buffers = command_buffers
+            .iter()
+            .map(|cmd| cmd.raw)
+            .collect::<Vec<_>>();
+
+        // No relay chain (must overlap render, not serialize behind it) and no
+        // device fence (a shared timeline signalled by two concurrent queues
+        // would violate monotonicity); signal ONLY the dedicated, compute-only
+        // mesher timeline, which the render submit waits on via `add_compute_wait`.
+        let mut wait_semaphores = SemaphoreList::new(SemaphoreListMode::Wait);
+        let mut signal_semaphores = SemaphoreList::new(SemaphoreListMode::Signal);
+        signal_semaphores.push_signal(SemaphoreType::Timeline(timeline, signal_value));
+
+        let mut vk_info = vk::SubmitInfo::default().command_buffers(&vk_cmd_buffers);
+        let mut vk_timeline_info = mem::MaybeUninit::uninit();
+        vk_info = SemaphoreList::add_to_submit(
+            &mut wait_semaphores,
+            &mut signal_semaphores,
+            vk_info,
+            &mut vk_timeline_info,
+        );
+
+        profiling::scope!("vkQueueSubmit(compute)");
+        unsafe {
+            self.device
+                .raw
+                .queue_submit(compute_queue, &[vk_info], vk::Fence::null())
+                .map_err(map_host_device_oom_and_lost_err)?
+        };
+        Ok(())
+    }
+
+    unsafe fn add_compute_wait(&self, value: crate::FenceValue) {
+        if let Some(timeline) = self.device.mesher_timeline {
+            self.compute_wait_semaphores.lock().push_wait(
+                SemaphoreType::Timeline(timeline, value),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+            );
+        }
+    }
+
+    unsafe fn get_compute_completed_value(&self) -> crate::FenceValue {
+        let Some(timeline) = self.device.mesher_timeline else {
+            return 0;
+        };
+        let value = match self.device.extension_fns.timeline_semaphore {
+            Some(ExtensionFn::Extension(ref ext)) => unsafe {
+                ext.get_semaphore_counter_value(timeline)
+            },
+            Some(ExtensionFn::Promoted) => unsafe {
+                self.device.raw.get_semaphore_counter_value(timeline)
+            },
+            None => return 0,
+        };
+        value.unwrap_or(0)
     }
 }
 

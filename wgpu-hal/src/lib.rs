@@ -1010,6 +1010,18 @@ pub trait Device: WasmNotSendSync {
         desc: &CommandEncoderDescriptor<<Self::A as Api>::Queue>,
     ) -> Result<<Self::A as Api>::CommandEncoder, DeviceError>;
 
+    /// Like [`Self::create_command_encoder`], but the command pool is created on
+    /// the dedicated async-compute queue family, so its command buffers can be
+    /// submitted via [`Queue::submit_compute`] to run concurrently with render
+    /// (the async-compute mesher∥render arc). Backends without a 2nd queue fall
+    /// back to the normal encoder.
+    unsafe fn create_command_encoder_compute(
+        &self,
+        desc: &CommandEncoderDescriptor<<Self::A as Api>::Queue>,
+    ) -> Result<<Self::A as Api>::CommandEncoder, DeviceError> {
+        unsafe { self.create_command_encoder(desc) }
+    }
+
     /// Creates a bind group layout.
     unsafe fn create_bind_group_layout(
         &self,
@@ -1251,6 +1263,35 @@ pub trait Queue: WasmNotSendSync {
         texture: <Self::A as Api>::SurfaceTexture,
     ) -> Result<(), SurfaceError>;
     unsafe fn get_timestamp_period(&self) -> f32;
+
+    /// Submit `command_buffers` (recorded on the async-compute family via
+    /// [`Device::create_command_encoder_compute`]) to the dedicated 2nd queue,
+    /// signalling the cross-queue mesher timeline to `signal_value`. It must NOT
+    /// chain on the render queue's relay/fence — the whole point is to run
+    /// concurrently with render, not serialized behind it (mesher∥render arc).
+    /// Default: unsupported (no 2nd queue).
+    unsafe fn submit_compute(
+        &self,
+        command_buffers: &[&<Self::A as Api>::CommandBuffer],
+        signal_value: FenceValue,
+    ) -> Result<(), DeviceError> {
+        let _ = (command_buffers, signal_value);
+        Err(DeviceError::Unexpected)
+    }
+
+    /// Make the NEXT [`Self::submit`] (render) wait on the mesher timeline
+    /// reaching `value` — render consuming this frame's mesher output. Default:
+    /// no-op.
+    unsafe fn add_compute_wait(&self, value: FenceValue) {
+        let _ = value;
+    }
+
+    /// Highest mesher-timeline value the GPU has signalled, for completion
+    /// tracking of compute submits (recycle encoders, fire readback maps).
+    /// Default: 0 (no 2nd queue).
+    unsafe fn get_compute_completed_value(&self) -> FenceValue {
+        0
+    }
 }
 
 /// Encoder and allocation pool for `CommandBuffer`s.

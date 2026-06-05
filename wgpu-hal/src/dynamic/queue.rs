@@ -20,6 +20,15 @@ pub trait DynQueue: DynResource {
         texture: Box<dyn DynSurfaceTexture>,
     ) -> Result<(), SurfaceError>;
     unsafe fn get_timestamp_period(&self) -> f32;
+
+    // Async-compute mesher∥render arc (see `Queue` trait for docs).
+    unsafe fn submit_compute(
+        &self,
+        command_buffers: &[&dyn DynCommandBuffer],
+        signal_value: FenceValue,
+    ) -> Result<(), DeviceError>;
+    unsafe fn add_compute_wait(&self, value: FenceValue);
+    unsafe fn get_compute_completed_value(&self) -> FenceValue;
 }
 
 impl<Q: Queue + DynResource> DynQueue for Q {
@@ -52,5 +61,25 @@ impl<Q: Queue + DynResource> DynQueue for Q {
 
     unsafe fn get_timestamp_period(&self) -> f32 {
         unsafe { Q::get_timestamp_period(self) }
+    }
+
+    unsafe fn submit_compute(
+        &self,
+        command_buffers: &[&dyn DynCommandBuffer],
+        signal_value: FenceValue,
+    ) -> Result<(), DeviceError> {
+        let command_buffers = command_buffers
+            .iter()
+            .map(|cb| (*cb).expect_downcast_ref())
+            .collect::<Vec<_>>();
+        unsafe { Q::submit_compute(self, &command_buffers, signal_value) }
+    }
+
+    unsafe fn add_compute_wait(&self, value: FenceValue) {
+        unsafe { Q::add_compute_wait(self, value) }
+    }
+
+    unsafe fn get_compute_completed_value(&self) -> FenceValue {
+        unsafe { Q::get_compute_completed_value(self) }
     }
 }
