@@ -127,6 +127,33 @@ impl Queue {
         self.life_tracker.lock()
     }
 
+    /// Register a `map_async` pending-map into the correct lifetime tracker
+    /// (mesher∥render arc). A buffer whose latest GPU use is an async-compute
+    /// (mesher) submission — e.g. a readback copied on the compute command
+    /// buffer — must defer its map to the `mesher_timeline`, fired by
+    /// [`Queue::maintain`]'s `compute_life.handle_mapping`. Routing it through
+    /// the render `life_tracker` (which never saw that submission) would land it
+    /// straight in `ready_to_map` and map it BEFORE the compute finishes →
+    /// stale/garbage readback + a race on the live GPU write.
+    ///
+    /// Invariant: a map_async'd buffer is compute-only OR render-only within a
+    /// frame, never both (the only compute-mapped buffer is the mesher readback;
+    /// render readbacks are render-only). The both-queues case is Phase-4 and
+    /// does not arise here. Render-only buffers take the `else` branch and are
+    /// byte-identical to the upstream `lock_life().map()` path.
+    pub(crate) fn map_buffer_for_async(&self, buffer: &Arc<Buffer>) -> Option<SubmissionIndex> {
+        {
+            let mut compute_life = self.compute_life_tracker.lock();
+            if compute_life
+                .get_buffer_latest_submission_index(buffer)
+                .is_some()
+            {
+                return compute_life.map(buffer);
+            }
+        }
+        self.lock_life().map(buffer)
+    }
+
     pub(crate) fn maintain(
         &self,
         submission_index: u64,

@@ -687,7 +687,11 @@ impl Buffer {
             .set_single(self, internal_use);
 
         let submit_index = if let Some(queue) = device.get_queue() {
-            queue.lock_life().map(self).unwrap_or(0) // '0' means no wait is necessary
+            // Route compute-used buffers (e.g. the mesher readback copied on the
+            // async-compute CB) to the compute lifetime tracker so the map defers
+            // to the mesher timeline; render-only buffers fall back to the render
+            // tracker, byte-identical to upstream. (mesher∥render arc)
+            queue.map_buffer_for_async(self).unwrap_or(0) // '0' means no wait is necessary
         } else {
             // We can safely unwrap below since we just set the `map_state` to `BufferMapState::Waiting`.
             let (mut operation, status) = self.map(&device.snatchable_lock.read()).unwrap();
