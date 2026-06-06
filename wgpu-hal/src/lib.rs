@@ -1286,6 +1286,14 @@ pub trait Queue: WasmNotSendSync {
         let _ = value;
     }
 
+    /// Make the NEXT [`Self::submit_compute`] (mesher) wait on the graphics
+    /// timeline reaching `value` — the mesher consuming this frame's queue-0
+    /// input upload + prior pool writes. The inverse of [`Self::add_compute_wait`].
+    /// Default: no-op.
+    unsafe fn add_graphics_wait(&self, value: FenceValue) {
+        let _ = value;
+    }
+
     /// Highest mesher-timeline value the GPU has signalled, for completion
     /// tracking of compute submits (recycle encoders, fire readback maps).
     /// Default: 0 (no 2nd queue).

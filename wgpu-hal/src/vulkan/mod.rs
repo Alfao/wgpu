@@ -513,6 +513,15 @@ struct DeviceShared {
     /// when there is no 2nd queue or no timeline-semaphore support.
     mesher_timeline: Option<vk::Semaphore>,
 
+    /// Cross-queue producer→consumer timeline for the OTHER direction
+    /// (async-compute mesher∥render arc): every queue-0 [`Queue::submit`] signals
+    /// it at that submit's monotonic fence value; the GPU-mesher submit waits on
+    /// the value it consumes (via [`Queue::add_graphics_wait`]) so the mesher
+    /// sees this frame's queue-0 input upload + prior-frame pool/residency writes
+    /// before it reads them. Signalled ONLY by the main (graphics) queue, so its
+    /// value stays monotonic. `None` without a 2nd queue / timeline support.
+    graphics_timeline: Option<vk::Semaphore>,
+
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
     drop_guard: Option<crate::DropGuard>,
@@ -528,6 +537,9 @@ impl Drop for DeviceShared {
                 .destroy_descriptor_set_layout(self.empty_descriptor_set_layout, None)
         };
         if let Some(sem) = self.mesher_timeline {
+            unsafe { self.raw.destroy_semaphore(sem, None) };
+        }
+        if let Some(sem) = self.graphics_timeline {
             unsafe { self.raw.destroy_semaphore(sem, None) };
         }
         if self.drop_guard.is_none() {
@@ -641,6 +653,11 @@ pub struct Queue {
     /// the render queue waits on the mesher-timeline value(s) it consumes,
     /// registered via [`Queue::add_compute_wait`] (async-compute mesher∥render arc).
     compute_wait_semaphores: Mutex<SemaphoreList>,
+    /// Cross-queue waits to inject into the NEXT [`submit_compute`](Queue::submit_compute):
+    /// the GPU-mesher submit waits on the graphics-timeline value(s) it consumes
+    /// (this frame's queue-0 input upload + prior pool writes), registered via
+    /// [`Queue::add_graphics_wait`] (async-compute mesher∥render arc).
+    graphics_wait_semaphores: Mutex<SemaphoreList>,
 }
 
 impl Queue {
@@ -1367,6 +1384,15 @@ impl crate::Queue for Queue {
             }
         }
 
+        // Cross-queue: signal the graphics timeline at this submit's fence value
+        // so the GPU mesher (on the 2nd queue) can wait on the queue-0 work it
+        // consumes — its input upload + prior pool writes (async-compute arc, the
+        // inverse of `add_compute_wait`). Signalled on EVERY queue-0 submit, so
+        // the value stays monotonic and matches the wgpu `SubmissionIndex`.
+        if let Some(timeline) = self.device.graphics_timeline {
+            signal_semaphores.push_signal(SemaphoreType::Timeline(timeline, signal_value));
+        }
+
         let vk_cmd_buffers = command_buffers
             .iter()
             .map(|cmd| cmd.raw)
@@ -1432,6 +1458,16 @@ impl crate::Queue for Queue {
         let mut signal_semaphores = SemaphoreList::new(SemaphoreListMode::Signal);
         signal_semaphores.push_signal(SemaphoreType::Timeline(timeline, signal_value));
 
+        // Cross-queue: wait on any graphics-timeline values the engine registered
+        // via `add_graphics_wait` — the mesher consumes this frame's queue-0 input
+        // upload + prior pool/residency writes before reading them.
+        {
+            let mut graphics_wait = self.graphics_wait_semaphores.lock();
+            if !graphics_wait.is_empty() {
+                wait_semaphores.append(&mut graphics_wait);
+            }
+        }
+
         let mut vk_info = vk::SubmitInfo::default().command_buffers(&vk_cmd_buffers);
         let mut vk_timeline_info = mem::MaybeUninit::uninit();
         vk_info = SemaphoreList::add_to_submit(
@@ -1454,6 +1490,15 @@ impl crate::Queue for Queue {
     unsafe fn add_compute_wait(&self, value: crate::FenceValue) {
         if let Some(timeline) = self.device.mesher_timeline {
             self.compute_wait_semaphores.lock().push_wait(
+                SemaphoreType::Timeline(timeline, value),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+            );
+        }
+    }
+
+    unsafe fn add_graphics_wait(&self, value: crate::FenceValue) {
+        if let Some(timeline) = self.device.graphics_timeline {
+            self.graphics_wait_semaphores.lock().push_wait(
                 SemaphoreType::Timeline(timeline, value),
                 vk::PipelineStageFlags::TOP_OF_PIPE,
             );

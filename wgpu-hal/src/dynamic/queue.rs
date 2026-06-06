@@ -28,6 +28,7 @@ pub trait DynQueue: DynResource {
         signal_value: FenceValue,
     ) -> Result<(), DeviceError>;
     unsafe fn add_compute_wait(&self, value: FenceValue);
+    unsafe fn add_graphics_wait(&self, value: FenceValue);
     unsafe fn get_compute_completed_value(&self) -> FenceValue;
 }
 
@@ -77,6 +78,10 @@ impl<Q: Queue + DynResource> DynQueue for Q {
 
     unsafe fn add_compute_wait(&self, value: FenceValue) {
         unsafe { Q::add_compute_wait(self, value) }
+    }
+
+    unsafe fn add_graphics_wait(&self, value: FenceValue) {
+        unsafe { Q::add_graphics_wait(self, value) }
     }
 
     unsafe fn get_compute_completed_value(&self) -> FenceValue {

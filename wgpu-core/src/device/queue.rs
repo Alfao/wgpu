@@ -1711,6 +1711,14 @@ impl Queue {
         unsafe { self.raw().add_compute_wait(value) }
     }
 
+    /// Make the NEXT [`Self::submit_compute`] (mesher) wait on the graphics
+    /// timeline reaching `value` — the mesher consuming this frame's queue-0
+    /// input upload + prior pool writes before it reads them. The inverse of
+    /// [`Self::add_compute_wait`]; `value` is a render [`SubmissionIndex`].
+    pub fn add_graphics_wait(&self, value: SubmissionIndex) {
+        unsafe { self.raw().add_graphics_wait(value) }
+    }
+
     pub fn get_timestamp_period(&self) -> f32 {
         unsafe { self.raw().get_timestamp_period() }
     }
@@ -1964,6 +1972,13 @@ impl Global {
     pub fn queue_add_compute_wait(&self, queue_id: QueueId, value: SubmissionIndex) {
         let queue = self.hub.queues.get(queue_id);
         queue.add_compute_wait(value);
+    }
+
+    /// Make the next `submit_compute` (mesher) on `queue_id` wait on the graphics
+    /// timeline reaching `value` (mesher∥render arc).
+    pub fn queue_add_graphics_wait(&self, queue_id: QueueId, value: SubmissionIndex) {
+        let queue = self.hub.queues.get(queue_id);
+        queue.add_graphics_wait(value);
     }
 
     pub fn queue_get_timestamp_period(&self, queue_id: QueueId) -> f32 {

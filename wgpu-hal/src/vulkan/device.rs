@@ -875,10 +875,30 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::BufferDescriptor,
     ) -> Result<super::Buffer, crate::DeviceError> {
-        let vk_info = vk::BufferCreateInfo::default()
+        // Async-compute mesher∥render arc: when a dedicated 2nd (compute) queue
+        // family exists, create EVERY buffer as VK_SHARING_MODE_CONCURRENT over
+        // {graphics, compute} families. The mesher (family 1) and render/
+        // propagators (family 0) share `quad_buf`/`input`/pools/`alloc_state`
+        // across queue families; EXCLUSIVE sharing would make those cross-family
+        // accesses UNDEFINED without a per-frame queue-family-ownership transfer.
+        // CONCURRENT + the existing cross-queue timeline semaphores
+        // (`add_compute_wait`/`add_graphics_wait`) is correct without QFOT
+        // barriers. Buffers are linear memory (no DCC), so the cost is negligible;
+        // textures stay EXCLUSIVE (the mesher touches none). `None`/same-family ⇒
+        // EXCLUSIVE, byte-identical to upstream.
+        let concurrent_families = self.shared.compute_family_index.and_then(|cf| {
+            (cf != self.shared.family_index).then_some([self.shared.family_index, cf])
+        });
+        let mut vk_info = vk::BufferCreateInfo::default()
             .size(desc.size)
-            .usage(conv::map_buffer_usage(desc.usage))
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            .usage(conv::map_buffer_usage(desc.usage));
+        vk_info = if let Some(ref families) = concurrent_families {
+            vk_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families)
+        } else {
+            vk_info.sharing_mode(vk::SharingMode::EXCLUSIVE)
+        };
 
         let raw = unsafe {
             self.shared

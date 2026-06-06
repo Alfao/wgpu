@@ -303,6 +303,14 @@ impl Queue {
         self.inner.add_compute_wait(value.index);
     }
 
+    /// Make the next [`Self::submit_compute`] (mesher) wait until the graphics
+    /// queue submission identified by `value` has completed on the GPU — so the
+    /// mesher sees this frame's queue-0 input upload + prior pool writes before
+    /// reading them. The inverse of [`Self::add_compute_wait`] (mesher∥render arc).
+    pub fn add_graphics_wait(&self, value: SubmissionIndex) {
+        self.inner.add_graphics_wait(value.index);
+    }
+
     /// Gets the amount of nanoseconds each tick of a timestamp query represents.
     ///
     /// Returns zero if timestamp queries are unsupported.

@@ -2731,19 +2731,21 @@ impl super::Adapter {
         // only when a dedicated 2nd queue AND timeline semaphores are available.
         // The compute (mesher) submit signals it; the render submit waits on the
         // value it consumes.
-        let mesher_timeline = if compute_raw_queue.is_some()
-            && self.private_caps.timeline_semaphores
-        {
+        let make_timeline = || {
             let mut sem_type_info =
                 vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
             let vk_info = vk::SemaphoreCreateInfo::default().push_next(&mut sem_type_info);
-            Some(
-                unsafe { raw_device.create_semaphore(&vk_info, None) }
-                    .map_err(super::map_host_device_oom_err)?,
-            )
-        } else {
-            None
+            unsafe { raw_device.create_semaphore(&vk_info, None) }
+                .map_err(super::map_host_device_oom_err)
         };
+        let (mesher_timeline, graphics_timeline) =
+            if compute_raw_queue.is_some() && self.private_caps.timeline_semaphores {
+                // The mesher (2nd queue) signals `mesher_timeline`, render waits;
+                // render (queue 0) signals `graphics_timeline`, the mesher waits.
+                (Some(make_timeline()?), Some(make_timeline()?))
+            } else {
+                (None, None)
+            };
 
         let shared = Arc::new(super::DeviceShared {
             raw: raw_device,
@@ -2753,6 +2755,7 @@ impl super::Adapter {
             compute_family_index,
             compute_raw_queue,
             mesher_timeline,
+            graphics_timeline,
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
@@ -2790,6 +2793,7 @@ impl super::Adapter {
             relay_semaphores: Mutex::new(relay_semaphores),
             signal_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Signal)),
             compute_wait_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Wait)),
+            graphics_wait_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Wait)),
         };
 
         let allocation_sizes = AllocationSizes::from_memory_hints(memory_hints).into();

@@ -279,6 +279,11 @@ pub trait QueueInterface: CommonTraits {
     fn add_compute_wait(&self, value: u64) {
         let _ = value;
     }
+    /// Make the next `submit_compute` (mesher) wait on the graphics timeline
+    /// reaching `value`. Default: no-op.
+    fn add_graphics_wait(&self, value: u64) {
+        let _ = value;
+    }
 
     fn get_timestamp_period(&self) -> f32;
     fn on_submitted_work_done(&self, callback: BoxSubmittedWorkDoneCallback);
