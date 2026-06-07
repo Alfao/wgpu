@@ -311,6 +311,17 @@ impl Queue {
         self.inner.add_graphics_wait(value.index);
     }
 
+    /// Whether the async-compute (mesher) submission identified by `index` has
+    /// completed on the GPU — a live, non-blocking query (no `device.poll`/wait
+    /// required). The inverse-direction companion to [`Self::add_compute_wait`]:
+    /// deferred GPU-resource retirement uses this to keep a freed pool slot the
+    /// mesher may still read on the compute queue out of the free-list until the
+    /// mesher submission that read it has finished. Always `true` on backends
+    /// without an async-compute queue (mesher∥render arc).
+    pub fn is_compute_submission_complete(&self, index: &SubmissionIndex) -> bool {
+        self.inner.compute_completed_value() >= index.index
+    }
+
     /// Gets the amount of nanoseconds each tick of a timestamp query represents.
     ///
     /// Returns zero if timestamp queries are unsupported.

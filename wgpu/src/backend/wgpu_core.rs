@@ -2169,6 +2169,10 @@ impl dispatch::QueueInterface for CoreQueue {
         self.context.0.queue_add_graphics_wait(self.id, value);
     }
 
+    fn compute_completed_value(&self) -> u64 {
+        self.context.0.queue_compute_completed_value(self.id)
+    }
+
     fn get_timestamp_period(&self) -> f32 {
         self.context.0.queue_get_timestamp_period(self.id)
     }

@@ -1711,6 +1711,16 @@ impl Queue {
         unsafe { self.raw().add_compute_wait(value) }
     }
 
+    /// The mesher (async-compute) timeline's currently-completed value — a
+    /// live, non-blocking query (`vkGetSemaphoreCounterValue`). Compare against
+    /// a [`Self::submit_compute`] index to test "has that mesher submit
+    /// completed on the GPU?" without a `device.poll`/wait. Used by deferred
+    /// GPU-slot retirement: a pool slot the mesher may still read on the
+    /// compute queue must not be reused until this reaches the mesher index.
+    pub fn compute_completed_value(&self) -> SubmissionIndex {
+        unsafe { self.raw().get_compute_completed_value() }
+    }
+
     /// Make the NEXT [`Self::submit_compute`] (mesher) wait on the graphics
     /// timeline reaching `value` — the mesher consuming this frame's queue-0
     /// input upload + prior pool writes before it reads them. The inverse of
@@ -1979,6 +1989,13 @@ impl Global {
     pub fn queue_add_graphics_wait(&self, queue_id: QueueId, value: SubmissionIndex) {
         let queue = self.hub.queues.get(queue_id);
         queue.add_graphics_wait(value);
+    }
+
+    /// The mesher (async-compute) timeline's completed value on `queue_id` —
+    /// non-blocking (mesher∥render arc; deferred-retirement gate).
+    pub fn queue_compute_completed_value(&self, queue_id: QueueId) -> SubmissionIndex {
+        let queue = self.hub.queues.get(queue_id);
+        queue.compute_completed_value()
     }
 
     pub fn queue_get_timestamp_period(&self, queue_id: QueueId) -> f32 {

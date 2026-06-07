@@ -284,6 +284,13 @@ pub trait QueueInterface: CommonTraits {
     fn add_graphics_wait(&self, value: u64) {
         let _ = value;
     }
+    /// The mesher (async-compute) timeline's currently-completed value — a
+    /// non-blocking query. Default: `u64::MAX` (no async-compute timeline →
+    /// treat every submission as complete, so the retirement gate never stalls
+    /// on a backend without a 2nd queue).
+    fn compute_completed_value(&self) -> u64 {
+        u64::MAX
+    }
 
     fn get_timestamp_period(&self) -> f32;
     fn on_submitted_work_done(&self, callback: BoxSubmittedWorkDoneCallback);
